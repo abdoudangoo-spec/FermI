@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// FermI — Règles Firebase Storage : refus par défaut, photos JPEG de 1,5 Mo maximum.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Photo de profil : un fichier par utilisateur
+    match /avatars/{file} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null
+        && file == request.auth.uid + '.jpg'
+        && request.resource.size < 1572864
+        && request.resource.contentType == 'image/jpeg';
+      allow delete: if request.auth != null && file == request.auth.uid + '.jpg';
+    }
+
+    // Photos d'annonces : dossier propre à chaque vendeur
+    match /annonces/{uid}/{file} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.auth.uid == uid
+        && request.resource.size < 1572864
+        && request.resource.contentType == 'image/jpeg';
+      allow update: if false;
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,135 @@
+rules_version = '2';
+
+// ═══════════════════════════════════════════════════════════
+//  FermI — Règles de sécurité Firestore
+//  Principe : refus par défaut. Chaque utilisateur n'accède qu'à son espace privé ;
+//  les contenus partagés (annonces, forum) sont lisibles par les comptes vérifiés,
+//  créés avec des champs validés, et supprimables par leur seul auteur.
+//  Déploiement : firebase deploy --only firestore:rules,firestore:indexes
+// ═══════════════════════════════════════════════════════════
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    // Email confirmé, ou connexion par SMS (numéro vérifié)
+    function verified() {
+      return signedIn() && (request.auth.token.email_verified == true
+        || request.auth.token.firebase.sign_in_provider == 'phone');
+    }
+    function str(v, max) { return v is string && v.size() <= max; }
+    function strBetween(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+
+    // ── Profil utilisateur ────────────────────────────────
+    match /utilisateurs/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['uid', 'nom', 'email', 'telephone', 'pays', 'zone', 'type_elevage',
+             'role', 'plan', 'majeur_confirme', 'cgu_version', 'cgu_acceptee_le', 'cree_le', 'modifie_le', 'photo_url'])
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'eleveur'
+        && request.resource.data.plan == 'gratuit'
+        && request.resource.data.majeur_confirme == true
+        && str(request.resource.data.nom, 80)
+        && str(request.resource.data.email, 120)
+        && str(request.resource.data.telephone, 20);
+      // role, plan, email, consentement : non modifiables côté client
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['nom', 'telephone', 'pays', 'zone', 'type_elevage', 'photo_url', 'modifie_le'])
+        && str(request.resource.data.nom, 80)
+        && str(request.resource.data.telephone, 20);
+      allow delete: if isOwner(uid);
+
+      // ── Données d'élevage sauvegardées (une sous-collection par table locale) ──
+      match /{table}/{docId} {
+        allow read, delete: if isOwner(uid) && verified();
+        allow create, update: if isOwner(uid) && verified()
+          && table in ['bandes', 'troupeaux_rum', 'animaux', 'ponte_journaliere', 'mortalite', 'consommation_aliment',
+                       'naissances', 'pesees', 'production_lait', 'sevrages', 'transactions', 'budgets',
+                       'calendrier_sanitaire', 'registre_hygiene', 'visiteurs']
+          && docId.matches('[0-9]+')
+          && request.resource.data.size() <= 40;
+      }
+    }
+
+    // ── Place de marché ───────────────────────────────────
+    match /marche_annonces/{id} {
+      allow read: if verified();
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['categorie', 'titre', 'description', 'prix', 'unite', 'quantite',
+             'localisation', 'contact', 'photo_url', 'photo_path', 'vendeur', 'uid_vendeur', 'statut', 'publie_le'])
+        && request.resource.data.uid_vendeur == request.auth.uid
+        && request.resource.data.statut == 'active'
+        && request.resource.data.categorie in ['animaux_vivants', 'oeufs', 'lait', 'viande', 'fiente', 'aliment', 'materiel', 'intrants']
+        && strBetween(request.resource.data.titre, 1, 80)
+        && str(request.resource.data.description, 1000)
+        && request.resource.data.prix is number && request.resource.data.prix > 0 && request.resource.data.prix <= 1000000000
+        && request.resource.data.quantite is number && request.resource.data.quantite >= 1 && request.resource.data.quantite <= 100000
+        && request.resource.data.unite == 'FCFA'
+        && strBetween(request.resource.data.localisation, 1, 80)
+        && strBetween(request.resource.data.contact, 1, 20)
+        && str(request.resource.data.photo_url, 800)
+        && str(request.resource.data.photo_path, 200)
+        && (request.resource.data.photo_path == ''
+            || request.resource.data.photo_path.matches('annonces/' + request.auth.uid + '/.*'))
+        && str(request.resource.data.vendeur, 60)
+        && request.resource.data.publie_le == request.time;
+      allow update: if false;
+      allow delete: if verified() && resource.data.uid_vendeur == request.auth.uid;
+    }
+
+    // ── Forum ─────────────────────────────────────────────
+    match /forum_posts/{postId} {
+      allow read: if verified();
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['titre', 'contenu', 'categorie', 'uid_auteur', 'auteur', 'publie_le'])
+        && request.resource.data.uid_auteur == request.auth.uid
+        && request.resource.data.categorie in ['sante', 'alimentation', 'batiment', 'prix', 'conseil', 'urgence']
+        && strBetween(request.resource.data.titre, 1, 120)
+        && strBetween(request.resource.data.contenu, 1, 2000)
+        && str(request.resource.data.auteur, 60)
+        && request.resource.data.publie_le == request.time;
+      allow update: if false;
+      allow delete: if verified() && resource.data.uid_auteur == request.auth.uid;
+
+      match /reponses/{reponseId} {
+        allow read: if verified();
+        allow create: if verified()
+          && request.resource.data.keys().hasOnly(['contenu', 'uid_auteur', 'auteur', 'publie_le'])
+          && request.resource.data.uid_auteur == request.auth.uid
+          && strBetween(request.resource.data.contenu, 1, 1000)
+          && str(request.resource.data.auteur, 60)
+          && request.resource.data.publie_le == request.time;
+        allow update: if false;
+        // supprimable par son auteur ou par l'auteur de la discussion
+        allow delete: if verified() && (resource.data.uid_auteur == request.auth.uid
+          || get(/databases/$(database)/documents/forum_posts/$(postId)).data.uid_auteur == request.auth.uid);
+      }
+    }
+
+    // Requêtes « mes réponses » (export, suppression de compte)
+    match /{path=**}/reponses/{reponseId} {
+      allow read: if verified();
+    }
+
+    // ── Signalements : écriture seule, lus uniquement par l'équipe (console / Admin SDK) ──
+    match /signalements/{id} {
+      allow read, update, delete: if false;
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['type_cible', 'cible_id', 'uid_cible', 'motif', 'details', 'uid_signalant', 'cree_le'])
+        && request.resource.data.uid_signalant == request.auth.uid
+        && request.resource.data.type_cible in ['annonce', 'post', 'reponse']
+        && request.resource.data.motif in ['spam', 'inapproprie', 'arnaque', 'illegal', 'autre']
+        && str(request.resource.data.cible_id, 100)
+        && str(request.resource.data.uid_cible, 128)
+        && str(request.resource.data.details, 500)
+        && request.resource.data.cree_le == request.time;
+    }
+
+    // Tout le reste est interdit
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
